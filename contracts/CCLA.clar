@@ -69,3 +69,84 @@
     last-updated: uint
   }
 )
+
+;; Liquidity pools
+(define-map liquidity-pools
+  { chain-id: (string-ascii 20), token-id: (string-ascii 20) }
+  {
+    token-contract: principal,
+    total-liquidity: uint,
+    available-liquidity: uint,
+    committed-liquidity: uint,
+    min-swap-amount: uint,
+    max-swap-amount: uint,
+    fee-bp: uint, ;; Fee in basis points
+    active: bool,
+    last-volume-24h: uint,
+    cumulative-volume: uint,
+    cumulative-fees: uint,
+    last-price: uint, ;; Last price in STX
+    creation-block: uint,
+    last-updated: uint
+  }
+)
+
+;; Token mappings across chains
+(define-map token-mappings
+  { source-chain: (string-ascii 20), source-token: (string-ascii 20), target-chain: (string-ascii 20) }
+  { target-token: (string-ascii 20) }
+)
+
+;; Cross-chain swaps
+(define-map swaps
+  { swap-id: uint }
+  {
+    initiator: principal,
+    source-chain: (string-ascii 20),
+    source-token: (string-ascii 20),
+    source-amount: uint,
+    target-chain: (string-ascii 20),
+    target-token: (string-ascii 20),
+    target-amount: uint,
+    recipient: principal,
+    timeout-block: uint,
+    hash-lock: (buff 32),
+    preimage: (optional (buff 32)),
+    status: uint,
+    execution-path: (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }),
+    max-slippage-bp: uint,
+    protocol-fee: uint,
+    relayer-fee: uint,
+    relayer: (optional principal),
+    creation-block: uint,
+    completion-block: (optional uint),
+    ref-hash: (string-ascii 64) ;; Reference hash for cross-chain tracking
+  }
+)
+
+;; Price oracles for tokens
+(define-map price-oracles
+  { chain-id: (string-ascii 20), token-id: (string-ascii 20) }
+  {
+    oracle-contract: principal,
+    last-price: uint, ;; In STX with 8 decimal precision
+    last-updated: uint,
+    heartbeat: uint, ;; Maximum time between updates in blocks
+    deviation-threshold: uint, ;; Max allowed deviation in basis points
+    trusted: bool
+  }
+)
+
+;; Authorized relayers
+(define-map relayers
+  { relayer: principal }
+  {
+    authorized: bool,
+    stake-amount: uint,
+    transactions-processed: uint,
+    cumulative-fees-earned: uint,
+    last-active: uint,
+    accuracy-score: uint, ;; 0-100 score
+    specialized-chains: (list 10 (string-ascii 20))
+  }
+)
