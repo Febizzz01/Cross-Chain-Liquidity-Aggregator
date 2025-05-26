@@ -285,3 +285,192 @@
   )
 )
 
+;; Map a token across chains
+(define-public (map-token
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20)))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: source-chain })) err-chain-not-found)
+    (asserts! (is-some (map-get? chains { chain-id: target-chain })) err-chain-not-found)
+    
+    ;; Create token mapping
+    (map-set token-mappings
+      { source-chain: source-chain, source-token: source-token, target-chain: target-chain }
+      { target-token: target-token }
+    )
+    
+    ;; Create reverse mapping
+    (map-set token-mappings
+      { source-chain: target-chain, source-token: target-token, target-chain: source-chain }
+      { target-token: source-token }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Register a price oracle
+(define-public (register-oracle
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (oracle-contract principal)
+  (heartbeat uint)
+  (deviation-threshold uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: chain-id })) err-chain-not-found)
+    
+    ;; Validate parameters
+    (asserts! (> heartbeat u0) err-invalid-parameters)
+    (asserts! (< deviation-threshold u10000) err-invalid-parameters) ;; Max 100% deviation threshold
+    
+    ;; Create oracle record
+    (map-set price-oracles
+      { chain-id: chain-id, token-id: token-id }
+      {
+        oracle-contract: oracle-contract,
+        last-price: u0,
+        last-updated: block-height,
+        heartbeat: heartbeat,
+        deviation-threshold: deviation-threshold,
+        trusted: true
+      }
+    )
+      (ok { chain: chain-id, token: token-id, oracle: oracle-contract })
+  )
+)
+
+;; Authorize a relayer
+(define-public (authorize-relayer
+  (relayer principal)
+  (specialized-chains (list 10 (string-ascii 20))))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    ;; Validate each chain exists
+    (asserts! (all-chains-exist specialized-chains) err-chain-not-found)
+    
+    ;; Create relayer record
+    (map-set relayers
+      { relayer: relayer }
+      {
+        authorized: true,
+        stake-amount: u0,
+        transactions-processed: u0,
+        cumulative-fees-earned: u0,
+        last-active: block-height,
+        accuracy-score: u80, ;; Start with 80/100 score
+        specialized-chains: specialized-chains
+      }
+    )
+    
+    (ok relayer)
+  )
+)
+
+;; Helper to verify all chains exist
+(define-private (all-chains-exist (chain-list (list 10 (string-ascii 20))))
+  (fold check-chain-exists true chain-list)
+)
+
+;; Helper to check if a chain exists
+(define-private (check-chain-exists (result bool) (chain-id (string-ascii 20)))
+  (and result (is-some (map-get? chains { chain-id: chain-id })))
+)
+
+;; Add liquidity to a pool
+(define-public (add-liquidity
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (amount uint))
+  
+  (let (
+    (provider tx-sender)
+    (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+  )
+    ;; Check for emergency shutdown
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate parameters
+    (asserts! (get active pool) err-inactive-pool)
+    (asserts! (get enabled chain) err-chain-not-found)
+    (asserts! (> amount (var-get min-liquidity)) err-invalid-parameters)
+    
+    ;; Transfer tokens to contract
+    (if (is-eq chain-id "stacks")
+      ;; For STX tokens
+      (if (is-eq token-id "stx")
+        (try! (stx-transfer? amount provider (as-contract tx-sender)))
+        ;; For other tokens on Stacks
+        (try! (contract-call? (get token-contract pool) transfer amount provider (as-contract tx-sender) none))
+      )
+      ;; For tokens on other chains, call adapter contract
+      (try! (contract-call? (get adapter-contract chain) lock-funds token-id amount provider (as-contract tx-sender)))
+    )
+    
+    ;; Update pool liquidity
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      (merge pool {
+        total-liquidity: (+ (get total-liquidity pool) amount),
+        available-liquidity: (+ (get available-liquidity pool) amount),
+        last-updated: block-height
+      })
+    )
+    
+    ;; Update liquidity provider record
+    (let (
+      (provider-record (default-to {
+                         liquidity-amount: u0,
+                         rewards-earned: u0,
+                         last-deposit-block: block-height,
+                         last-withdrawal-block: none
+                       } (map-get? liquidity-providers { chain-id: chain-id, token-id: token-id, provider: provider })))
+    )
+      (map-set liquidity-providers
+        { chain-id: chain-id, token-id: token-id, provider: provider }
+        (merge provider-record {
+          liquidity-amount: (+ (get liquidity-amount provider-record) amount),
+          last-deposit-block: block-height
+        })
+      )
+    )
+    
+    (ok amount)
+  )
+)
+
+;; Remove liquidity from a pool
+(define-public (remove-liquidity
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (amount uint))
+  
+  (let (
+    (provider tx-sender)
+    (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+    (provider-record (unwrap! (map-get? liquidity-providers 
+                                        { chain-id: chain-id, token-id: token-id, provider: provider }) 
+                              err-not-authorized))
+  )
+    ;; Validate parameters
+    (asserts! (<= amount (get liquidity-amount provider-record)) err-insufficient-funds)
+    (asserts! (<= amount (get available-liquidity pool)) err-insufficient-liquidity)
+    
+    ;; Update pool liquidity
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      (merge pool {
+        total-liquidity: (- (get total-liquidity pool) amount),
+        available-liquidity: (- (get available-liquidity pool) amount),
+        last-updated: block-height
+      })
+    )
