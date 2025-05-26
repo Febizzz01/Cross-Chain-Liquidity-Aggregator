@@ -474,3 +474,138 @@
         last-updated: block-height
       })
     )
+    
+    ;; Update liquidity provider record
+    (map-set liquidity-providers
+      { chain-id: chain-id, token-id: token-id, provider: provider }
+      (merge provider-record {
+        liquidity-amount: (- (get liquidity-amount provider-record) amount),
+        last-withdrawal-block: (some block-height)
+      })
+    )
+    
+    ;; Transfer tokens back to provider
+    (if (is-eq chain-id "stacks")
+      ;; For STX tokens
+      (if (is-eq token-id "stx")
+        (as-contract (try! (stx-transfer? amount (as-contract tx-sender) provider)))
+        ;; For other tokens on Stacks
+        (as-contract (try! (contract-call? (get token-contract pool) transfer amount (as-contract tx-sender) provider none)))
+      )
+      ;; For tokens on other chains, call adapter contract
+      (as-contract (try! (contract-call? (get adapter-contract chain) release-funds token-id amount (as-contract tx-sender) provider)))
+    )
+    
+    (ok amount)
+  )
+)
+;; Initiate a cross-chain swap
+(define-public (initiate-cross-chain-swap
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (source-amount uint)
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20))
+  (recipient principal)
+  (hash-lock (buff 32))
+  (execution-path (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }))
+  (slippage-bp uint))
+  
+  (let (
+    (initiator tx-sender)
+    (swap-id (var-get next-swap-id))
+    (timeout-block (+ block-height (var-get default-timeout-blocks)))
+    (routing-valid (validate-execution-path source-chain source-token target-chain target-token execution-path))
+  )
+    ;; Check for emergency shutdown
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate parameters
+    (asserts! (is-ok routing-valid) err-invalid-path)
+    (asserts! (<= slippage-bp (var-get max-slippage-bp)) err-invalid-parameters)
+    (asserts! (not (is-eq source-chain target-chain)) err-invalid-parameters) ;; Must be cross-chain
+    
+    ;; Check source chain and token exist
+    (let (
+      (source-pool (unwrap! (map-get? liquidity-pools { chain-id: source-chain, token-id: source-token }) err-pool-not-found))
+      (source-chain-info (unwrap! (map-get? chains { chain-id: source-chain }) err-chain-not-found))
+      (estimated-output (unwrap! (get-estimated-output source-chain source-token source-amount target-chain target-token) err-invalid-route))
+    )
+      ;; Validate swap amount
+      (asserts! (>= source-amount (get min-swap-amount source-pool)) err-invalid-parameters)
+      (asserts! (<= source-amount (get max-swap-amount source-pool)) err-invalid-parameters)
+      (asserts! (<= source-amount (get available-liquidity source-pool)) err-insufficient-liquidity)
+      
+      ;; Calculate fees
+      (let (
+        (protocol-fee (/ (* source-amount (var-get protocol-fee-bp)) u10000))
+        (pool-fee (/ (* source-amount (get fee-bp source-pool)) u10000))
+        (relayer-fee (/ (* protocol-fee (var-get relayer-reward-percentage)) u100))
+        (total-fee (+ protocol-fee pool-fee))
+        (net-amount (- source-amount total-fee))
+        (ref-hash (generate-ref-hash swap-id hash-lock block-height))
+      )
+        ;; Lock source tokens in contract
+        (if (is-eq source-chain "stacks")
+          ;; For STX tokens
+          (if (is-eq source-token "stx")
+            (try! (stx-transfer? source-amount initiator (as-contract tx-sender)))
+            ;; For other tokens on Stacks
+            (try! (contract-call? (get token-contract source-pool) transfer source-amount initiator (as-contract tx-sender) none))
+          )
+          ;; For tokens on other chains, call adapter contract
+          (try! (contract-call? (get adapter-contract source-chain-info) lock-funds source-token source-amount initiator (as-contract tx-sender)))
+        )
+        
+        ;; Update available liquidity
+        (map-set liquidity-pools
+          { chain-id: source-chain, token-id: source-token }
+          (merge source-pool {
+            available-liquidity: (- (get available-liquidity source-pool) net-amount),
+            committed-liquidity: (+ (get committed-liquidity source-pool) net-amount),
+            cumulative-volume: (+ (get cumulative-volume source-pool) source-amount),
+            cumulative-fees: (+ (get cumulative-fees source-pool) pool-fee),
+            last-updated: block-height
+          })
+        )
+        
+        ;; Create swap record
+        (map-set swaps
+          { swap-id: swap-id }
+          {
+            initiator: initiator,
+            source-chain: source-chain,
+            source-token: source-token,
+            source-amount: source-amount,
+            target-chain: target-chain,
+            target-token: target-token,
+            target-amount: estimated-output,
+            recipient: recipient,
+            timeout-block: timeout-block,
+            hash-lock: hash-lock,
+            preimage: none,
+            status: u0, ;; Pending
+            execution-path: execution-path,
+            max-slippage-bp: slippage-bp,
+            protocol-fee: protocol-fee,
+            relayer-fee: relayer-fee,
+            relayer: none,
+            creation-block: block-height,
+            completion-block: none,
+            ref-hash: ref-hash
+          }
+        )
+        
+        ;; Increment swap ID
+        (var-set next-swap-id (+ swap-id u1))
+        
+        (ok { 
+          swap-id: swap-id, 
+          timeout-block: timeout-block, 
+          estimated-output: estimated-output,
+          ref-hash: ref-hash
+        })
+      )
+    )
+  )
+)
