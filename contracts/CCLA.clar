@@ -1009,3 +1009,169 @@
         )
         true
       )
+      
+      ;; Update price
+      (map-set price-oracles
+        { chain-id: chain-id, token-id: token-id }
+        (merge oracle {
+          last-price: price,
+          last-updated: block-height
+        })
+      )
+      
+      ;; Update pool last price
+      (match (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id })
+        pool (map-set liquidity-pools
+               { chain-id: chain-id, token-id: token-id }
+               (merge pool { last-price: price })
+             )
+        true
+      )
+      
+      (ok price)
+    )
+  )
+)
+
+;; Stake as a relayer
+(define-public (stake-as-relayer (amount uint))
+  (let (
+    (relayer tx-sender)
+    (relayer-record (unwrap! (map-get? relayers { relayer: relayer }) err-relayer-not-found))
+  )
+    ;; Validate relayer is authorized
+    (asserts! (get authorized relayer-record) err-not-authorized)
+    
+    ;; Transfer stake to contract
+    (try! (stx-transfer? amount relayer (as-contract tx-sender)))
+    
+    ;; Update relayer record
+    (map-set relayers
+      { relayer: relayer }
+      (merge relayer-record {
+        stake-amount: (+ (get stake-amount relayer-record) amount)
+      })
+    )
+    
+    (ok { staked: amount })
+  )
+)
+
+;; Unstake as a relayer
+(define-public (unstake-as-relayer (amount uint))
+  (let (
+    (relayer tx-sender)
+    (relayer-record (unwrap! (map-get? relayers { relayer: relayer }) err-relayer-not-found))
+    (current-stake (get stake-amount relayer-record))
+  )
+    ;; Validate amount
+    (asserts! (<= amount current-stake) err-insufficient-funds)
+    
+    ;; Transfer stake back to relayer
+    (as-contract (try! (stx-transfer? amount (as-contract tx-sender) relayer)))
+    
+    ;; Update relayer record
+    (map-set relayers
+      { relayer: relayer }
+      (merge relayer-record {
+        stake-amount: (- current-stake amount)
+      })
+    )
+    
+    (ok { unstaked: amount })
+  )
+)
+
+;; Emergency shutdown
+(define-public (set-emergency-shutdown (shutdown bool))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set emergency-shutdown shutdown)
+    (ok shutdown)
+  )
+)
+
+;; Update protocol parameters
+(define-public (set-protocol-fee (new-fee-bp uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-fee-bp u500) err-invalid-fee) ;; Max 5% fee
+    
+    (var-set protocol-fee-bp new-fee-bp)
+    (ok new-fee-bp)
+  )
+)
+
+;; Update max slippage
+(define-public (set-max-slippage (new-slippage-bp uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-slippage-bp u1000) err-invalid-parameters) ;; Max 10% slippage
+    
+    (var-set max-slippage-bp new-slippage-bp)
+    (ok new-slippage-bp)
+  )
+)
+
+;; Update treasury address
+(define-public (set-treasury-address (new-treasury principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    (var-set treasury-address new-treasury)
+    (ok new-treasury)
+  )
+)
+
+;; Update chain status
+(define-public (set-chain-status
+  (chain-id (string-ascii 20))
+  (enabled bool)
+  (status uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (< status u3) err-invalid-parameters) ;; Valid status
+    
+    (let (
+      (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+    )
+      (map-set chains
+        { chain-id: chain-id }
+        (merge chain {
+          status: status,
+          enabled: enabled,
+          last-updated: block-height
+        })
+      )
+      
+      (ok { chain: chain-id, status: status })
+    )
+  )
+)
+
+;; Update pool status
+(define-public (set-pool-status
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (active bool))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    (let (
+      (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    )
+      (map-set liquidity-pools
+        { chain-id: chain-id, token-id: token-id }
+        (merge pool {
+          active: active,
+          last-updated: block-height
+        })
+      )
+      
+      (ok { chain: chain-id, token: token-id, active: active })
+    )
+  )
+)
+
