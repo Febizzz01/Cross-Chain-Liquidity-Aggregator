@@ -1175,3 +1175,78 @@
   )
 )
 
+;; Read-only functions
+
+;; Get swap details
+(define-read-only (get-swap (swap-id uint))
+  (map-get? swaps { swap-id: swap-id })
+)
+
+;; Get chain info
+(define-read-only (get-chain (chain-id (string-ascii 20)))
+  (map-get? chains { chain-id: chain-id })
+)
+
+;; Get pool info
+(define-read-only (get-pool (chain-id (string-ascii 20)) (token-id (string-ascii 20)))
+  (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id })
+)
+
+;; Get oracle info
+(define-read-only (get-oracle (chain-id (string-ascii 20)) (token-id (string-ascii 20)))
+  (map-get? price-oracles { chain-id: chain-id, token-id: token-id })
+)
+
+;; Get token mapping
+(define-read-only (get-token-mapping (source-chain (string-ascii 20)) (source-token (string-ascii 20)) (target-chain (string-ascii 20)))
+  (map-get? token-mappings { source-chain: source-chain, source-token: source-token, target-chain: target-chain })
+)
+
+;; Get liquidity provider info
+(define-read-only (get-liquidity-provider (chain-id (string-ascii 20)) (token-id (string-ascii 20)) (provider principal))
+  (map-get? liquidity-providers { chain-id: chain-id, token-id: token-id, provider: provider })
+)
+
+;; Get cached route
+(define-read-only (get-cached-route (route-id uint))
+  (map-get? route-cache { route-id: route-id })
+)
+
+;; Get relayer info
+(define-read-only (get-relayer (relayer principal))
+  (map-get? relayers { relayer: relayer })
+)
+
+;; Get chain status as string
+(define-read-only (get-chain-status-string (chain-id (string-ascii 20)))
+  (let (
+    (chain (map-get? chains { chain-id: chain-id }))
+  )
+    (if (is-some chain)
+      (let (
+        (status (get status (unwrap-panic chain)))
+        (status-list (var-get chain-statuses))
+      )
+        (default-to "Unknown" (element-at status-list status))
+      )
+      "Not Found"
+    )
+  )
+)
+
+;; Get swap status as string
+(define-read-only (get-swap-status-string (swap-id uint))
+  (let (
+    (swap (map-get? swaps { swap-id: swap-id }))
+  )
+    (if (is-some swap)
+      (let (
+        (status (get status (unwrap-panic swap)))
+        (status-list (var-get swap-statuses))
+      )
+        (default-to "Unknown" (element-at status-list status))
+      )
+      "Not Found"
+    )
+  )
+)
